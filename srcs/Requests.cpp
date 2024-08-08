@@ -1,12 +1,66 @@
 
 #include "../includes/Requests.hpp"
 
+Requests::Requests(const Requests& other) 
+    :  _statusCode(other._statusCode),
+	  _method(other._method),
+      _path(other._path),
+      _query(other._query),
+      _protocol(other._protocol),
+      _accept(other._accept),
+      _contentType(other._contentType),
+      _servParam(other._servParam),
+      _paramValid(other._paramValid),
+      _cgiPathPy(other._cgiPathPy),
+      _cgiPathPhp(other._cgiPathPhp),
+      _body(other._body),
+      _requestContentType(other._requestContentType),
+      _headers(other._headers),
+	  _clientSocket(other._clientSocket){}
+
+Requests& Requests::operator=(const Requests& other) {
+    if (this != &other) {
+		_statusCode = other._statusCode;
+        _method = other._method;
+        _path = other._path;
+        _query = other._query;
+        _protocol = other._protocol;
+        _accept = other._accept;
+        _contentType = other._contentType;
+        _servParam = other._servParam;
+        _paramValid = other._paramValid;
+        _cgiPathPy = other._cgiPathPy;
+        _cgiPathPhp = other._cgiPathPhp;
+        _body = other._body;
+        _requestContentType = other._requestContentType;
+        _headers = other._headers;
+		_clientSocket = other._clientSocket;
+    }
+    return *this;
+}
+
 std::string itostr(int nb) {
 	std::stringstream ss;
 	std::string str;
 	ss << nb;
 	ss >> str;
 	return str;
+}
+
+std::string Requests::getContentLength() const {
+    for (std::map<std::string, std::string>::const_iterator it = this->_headers.begin(); it != this->_headers.end(); ++it) {
+        std::cout << it->first << ": " << it->second << std::endl;
+    }
+    std::map<std::string, std::string>::const_iterator it = this->_headers.find("Content-Length");
+    if (it != this->_headers.end()) {
+        return it->second;
+    }
+    return "";
+}
+
+
+void Requests::setStatusCode(int statusCode) {
+    this->_statusCode = statusCode;
 }
 
 void Requests::receiveBody(const std::string &buffBody) {
@@ -126,6 +180,76 @@ Server Requests::findServerWithSocket(std::vector<Server> manager, int serverSoc
 }
 
 std::string Requests::getBody(std::vector<std::string> bufSplitted, size_t index, std::map<std::string, std::string> request) {
+    std::map<std::string, std::string>::iterator it = request.find("Content-Length");
+    size_t length = (it != request.end()) ? atoi(it->second.c_str()) : 0;
+    
+    if (length > this->_servParam.getClientMaxBodySize()) {
+        this->_statusCode = NOT_IMPLEMENTED;
+        std::cout << "Error: Body Length exceeds Client Max Body Size" << std::endl;
+        return "";
+    }
+
+    if (length != 0) {
+        if (index + 1 >= bufSplitted.size() || length != bufSplitted[index + 1].size()) {
+            this->_statusCode = BAD_REQUEST;
+            std::cout << "Error: Body Length does not match actual length" << std::endl;
+            return "";
+        }
+        return bufSplitted[index + 1];
+    }
+
+    bool chunked = request.find("Transfer-Encoding") != request.end() && request["Transfer-Encoding"] == "chunked";
+    if (chunked) {
+        std::string body;
+        size_t find;
+        bool line = 0;
+        char *endPtr;
+        size_t nbOfReturn = 0;
+
+        for (size_t i = index + 1; i < bufSplitted.size(); i++) {
+            find = bufSplitted[i].find("\r");
+            if (find != std::string::npos)
+                bufSplitted[i].erase(find);
+            if (!bufSplitted[i].empty()) {
+                nbOfReturn++;
+                body.append("\n");
+            } else if (line == 0) {
+                size_t lenTmp = std::strtol(bufSplitted[i].c_str(), &endPtr, 16);
+                if (lenTmp == 0)
+                    break;
+                length += lenTmp;
+                if (*endPtr != '\0') {
+                    this->_statusCode = BAD_REQUEST;
+                    std::cout << "Error: Invalid Chunked Encoding" << std::endl;
+                    return "";
+                }
+                line = !line;
+            } else {
+                body.append(bufSplitted[i]);
+                line = !line;
+            }
+        }
+
+        if (length > this->_servParam.getClientMaxBodySize()) {
+            this->_statusCode = NOT_IMPLEMENTED;
+            std::cout << "Error: Total Chunked Length exceeds Client Max Body Size" << std::endl;
+            return "";
+        }
+        if (length - nbOfReturn != body.size()) {
+            this->_statusCode = BAD_REQUEST;
+            std::cout << "Error: Total Chunked Length does not match actual length" << std::endl;
+            return "";
+        }
+        return body;
+    }
+
+    return "";
+}
+
+
+
+/*
+std::string Requests::getBody(std::vector<std::string> bufSplitted, size_t index, std::map<std::string, std::string> request) {
 	size_t length = atoi(request["Content-Length"].c_str());
 	if (length > this->_servParam.getClientMaxBodySize()) {
 		this->_statusCode = NOT_IMPLEMENTED;
@@ -182,6 +306,9 @@ std::string Requests::getBody(std::vector<std::string> bufSplitted, size_t index
 	return "";
 }
 
+*/
+
+
 std::string Requests::getRootPath(const std::string &path) {
 	if (path == "/favicon.ico")
 		return "./pages/favicon.ico";
@@ -203,43 +330,198 @@ std::string Requests::getRootPath(const std::string &path) {
 	return "." + this->_servParam.getRoot() + path;
 }
 
-Requests::Requests(const std::string &buf, std::vector<Server> manager, int serverSocket) {
+Requests::Requests(const std::string &buf, std::vector<Server> manager, int serverSocket)
+    : _statusCode(OK), _method(""), _path(""), _query(""), _protocol(""), _accept(), _contentType(""), _servParam(), _paramValid(false), _cgiPathPy(""), _cgiPathPhp(""), _body(""), _requestContentType(""), _headers() {
+    std::cout << "Initializing Requests object" << std::endl;
+	parseRequest(buf);
 	std::vector<std::string> bufSplitted = split(buf, "\n");
-	if (!isSyntaxGood(bufSplitted)) {
-		this->_paramValid = 1;
-		this->_servParam = findServerWithSocket(manager, serverSocket, "localhost");
-		this->_statusCode = BAD_REQUEST;
-	}
-	else {
-		std::map<std::string, std::string> request;
-		std::vector<std::string> methodPathProtocol = split(bufSplitted[0], " ");
-		request.insert(std::make_pair("Method", methodPathProtocol[0]));
-		request.insert(std::make_pair("Path", methodPathProtocol[1]));
-		request.insert(std::make_pair("Protocol", methodPathProtocol[2]));
-		for (size_t i = 1; i < bufSplitted.size(); i++) {
-			if (!bufSplitted[i].compare("\r")) {
-				if (i + 1 != bufSplitted.size())
-					request.insert(std::make_pair("Body", getBody(bufSplitted, i, request)));
-				break;
-			}
-			request.insert(std::make_pair(bufSplitted[i].substr(0, bufSplitted[i].find(": ")), bufSplitted[i].substr(bufSplitted[i].find(": ") + 2, bufSplitted[i].size())));
-		}
-		this->_paramValid = 1;
-		this->_servParam = findServerWithSocket(manager, serverSocket, request["Host"]);
-		this->_method = request["Method"];
-		this->_path = getRootPath(request["Path"]);
-		this->_protocol = request["Protocol"];
-		this->_accept = getAccept(request["Accept"]);
-		this->_body = request["Body"];
-		this->_requestContentType = request["Content-Type"];
-		getQuery();
-		setCgiPathPy(extractCgiPathPy());
-		setCgiPathPhp(extractCgiPathPhp());
-		if (this->_protocol != "HTTP/1.1")
-			this->_statusCode = HTTP_VERSION_NOT_SUPPORTED;
-		else
-			this->_statusCode = OK;
-	}
+    if (!isSyntaxGood(bufSplitted)) {
+        this->_paramValid = 1;
+        this->_servParam = findServerWithSocket(manager, serverSocket, "localhost");
+        this->_statusCode = BAD_REQUEST;
+    } else {
+        std::map<std::string, std::string> request;
+        std::vector<std::string> methodPathProtocol = split(bufSplitted[0], " ");
+        request.insert(std::make_pair("Method", methodPathProtocol[0]));
+        request.insert(std::make_pair("Path", methodPathProtocol[1]));
+        request.insert(std::make_pair("Protocol", methodPathProtocol[2]));
+        for (size_t i = 1; i < bufSplitted.size(); i++) {
+            if (!bufSplitted[i].compare("\r")) {
+                if (i + 1 != bufSplitted.size())
+                    request.insert(std::make_pair("Body", getBody(bufSplitted, i, request)));
+                break;
+            }
+            request.insert(std::make_pair(bufSplitted[i].substr(0, bufSplitted[i].find(": ")), bufSplitted[i].substr(bufSplitted[i].find(": ") + 2, bufSplitted[i].size())));
+        }
+        this->_paramValid = 1;
+        this->_servParam = findServerWithSocket(manager, serverSocket, request["Host"]);
+        this->_method = request["Method"];
+        this->_path = getRootPath(request["Path"]);
+        this->_protocol = request["Protocol"];
+        this->_accept = getAccept(request["Accept"]);
+        this->_body = request["Body"];
+        this->_requestContentType = request["Content-Type"];
+        this->_headers = request;
+        getQuery();
+        setCgiPathPy(extractCgiPathPy());
+        setCgiPathPhp(extractCgiPathPhp());
+        if (this->_protocol != "HTTP/1.1")
+            this->_statusCode = HTTP_VERSION_NOT_SUPPORTED;
+        else
+            this->_statusCode = OK;
+		std::cout << "METHOD: " << this->_method << std::endl;
+        std::cout << "REQUEST CONTENT TYPE: " << this->_requestContentType << std::endl;
+    }
+}
+
+
+
+void Requests::parseRequest(const std::string& rawRequest) {
+
+
+    size_t headersEnd = rawRequest.find("\r\n\r\n");
+    if (headersEnd != std::string::npos) {
+        std::string headersPart = rawRequest.substr(0, headersEnd);
+        parseHeaders(headersPart);
+    }
+}
+
+void Requests::parseHeaders(const std::string& headersPart) {
+    std::istringstream stream(headersPart);
+    std::string line;
+    while (std::getline(stream, line) && line != "\r") {
+        size_t delimiterPos = line.find(": ");
+        if (delimiterPos != std::string::npos) {
+            std::string headerName = line.substr(0, delimiterPos);
+            std::string headerValue = line.substr(delimiterPos + 2);
+            _headers[headerName] = headerValue;
+        }
+    }
+}
+/*
+void Requests::handleRequest(const std::string& rawRequest) {
+    // Parse headers and determine the type of request (GET, POST, etc.)
+    parseRequest(rawRequest);
+
+    if (_headers["Method"] == "POST") {
+        handlePostRequest();
+    }
+
+    // ... (autres types de requêtes)
+}
+
+void Requests::handleGetRequest() {
+    // Logique pour gérer les requêtes GET
+    std::string responseBody = "<html><body><h1>GET Response</h1></body></html>";
+    sendResponse(_clientSocket, responseBody);
+}
+*/
+
+void Requests::parseMultipartPart(const std::string& part) {
+    // Parse the headers and the content of each part
+    size_t headerEnd = part.find("\r\n\r\n");
+    if (headerEnd == std::string::npos) {
+        return;  // Invalid part
+    }
+
+    std::string headersPart = part.substr(0, headerEnd);
+    std::string contentPart = part.substr(headerEnd + 4);
+
+    // Parse headers
+    std::istringstream stream(headersPart);
+    std::string line;
+    std::map<std::string, std::string> partHeaders;
+    while (std::getline(stream, line) && line != "\r") {
+        size_t delimiterPos = line.find(": ");
+        if (delimiterPos != std::string::npos) {
+            std::string headerName = line.substr(0, delimiterPos);
+            std::string headerValue = line.substr(delimiterPos + 2);
+            partHeaders[headerName] = headerValue;
+        }
+    }
+
+    // Process the content of the part based on headers
+    if (partHeaders["Content-Disposition"].find("filename=") != std::string::npos) {
+        // This part is a file
+        std::string filename = partHeaders["Content-Disposition"].substr(partHeaders["Content-Disposition"].find("filename=") + 10);
+        filename = filename.substr(0, filename.size() - 1); // Remove trailing quote
+
+        // Save the file content
+        std::ofstream file(("uploads/" + filename).c_str(), std::ios::binary);
+        file.write(contentPart.c_str(), contentPart.size());
+        file.close();
+    } else {
+        // This part is a regular form field
+        std::string fieldName = partHeaders["Content-Disposition"].substr(partHeaders["Content-Disposition"].find("name=") + 6);
+        fieldName = fieldName.substr(0, fieldName.size() - 1); // Remove trailing quote
+        // Process form field content
+    }
+}
+
+void Requests::processMultipartFormData(const std::string& bodyData) {
+    std::string boundary = "--" + _headers["Content-Type"].substr(_headers["Content-Type"].find("boundary=") + 9);
+
+    size_t start = bodyData.find(boundary);
+    while (start != std::string::npos) {
+        start += boundary.size();
+        if (bodyData.substr(start, 2) == "--") {
+            break;  // End of multipart data
+        }
+
+        size_t end = bodyData.find(boundary, start);
+        if (end == std::string::npos) {
+            break;  // No more parts
+        }
+
+        std::string part = bodyData.substr(start, end - start);
+        parseMultipartPart(part);
+
+        start = end;
+    }
+}
+void Requests::handlePostRequest() {
+    size_t contentLength = static_cast<size_t>(atoi(_headers["Content-Length"].c_str()));
+    size_t totalBytesRead = 0;
+    std::string bodyData;
+
+    while (totalBytesRead < contentLength) {
+        char buffer[1024];
+        ssize_t bytesRead = recv(_clientSocket, buffer, sizeof(buffer), 0);
+        if (bytesRead <= 0) {
+            // Handle error or client disconnect
+            break;
+        }
+        bodyData.append(buffer, bytesRead);
+        totalBytesRead += bytesRead;
+    }
+
+    // Now, bodyData contains the complete body of the request
+    processMultipartFormData(bodyData);
+}
+
+void Requests::sendResponse(int clientSocket, const std::string& responseBody) {
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: text/html\r\n";
+    response += "Content-Length: " + intToString(responseBody.size()) + "\r\n";
+    response += "\r\n";
+    response += responseBody;
+
+    send(clientSocket, response.c_str(), response.size(), 0);
+    close(clientSocket);
+}
+
+
+
+std::string Requests::intToString(int value) {
+    std::ostringstream oss;
+    oss << value;
+    return oss.str();
+}
+
+std::string Requests::size_tToString(size_t value) {
+    std::ostringstream oss;
+    oss << value;
+    return oss.str();
 }
 
 Requests::~Requests() {}
@@ -353,7 +635,8 @@ std::vector<std::string> Requests::createCgiEnv() {
 std::string Requests::getRequestContentType() const {return this->_requestContentType;}
 
 
-std::string  Requests::execCgi(const std::string& scriptType) {
+std::string  Requests::execCgi(const std::string& scriptType) 
+{
 	int childPid;
 	int childValue;
 	int fd[2];
@@ -373,7 +656,6 @@ std::string  Requests::execCgi(const std::string& scriptType) {
 	}
 	if (!childPid) {
 		if (!this->_method.compare("POST")) {
-			std::cout << "CONTENT TYPE  " << this->_contentType << std::endl;
 			close(fdBody[1]);
 			if (dup2(fdBody[0], STDIN_FILENO))
 				exit(EXIT_FAILURE);
@@ -413,7 +695,7 @@ std::string  Requests::execCgi(const std::string& scriptType) {
 	return response;
 }
 
-
+/*
 std::string Requests::doUpload() {
 	std::string uploadDir = "uploadDir";
 	if (uploadDir.empty())
@@ -426,15 +708,46 @@ std::string Requests::doUpload() {
 	this->_statusCode = 413;
 	return setErrorPage();
 }
+*/
+
+std::string Requests::doUpload() {
+    // Analysez le corps de la requête pour extraire le fichier
+    // Enregistrez le fichier sur le serveur
+    // Retournez une réponse appropriée
+
+    // Voici un exemple simplifié
+    std::string boundary = "--" + this->_requestContentType.substr(this->_requestContentType.find("boundary=") + 9);
+    size_t pos = this->_body.find(boundary);
+    if (pos == std::string::npos) {
+        this->_statusCode = BAD_REQUEST;
+        return setErrorPage();
+    }
+
+    pos += boundary.size();
+    size_t end = this->_body.find(boundary, pos);
+    if (end == std::string::npos) {
+        this->_statusCode = BAD_REQUEST;
+        return setErrorPage();
+    }
+
+    std::string fileData = this->_body.substr(pos, end - pos);
+    // Enregistrez fileData sur le disque
+    std::ofstream outFile("uploaded_file", std::ios::binary);
+    outFile.write(fileData.c_str(), fileData.size());
+    outFile.close();
+
+    this->_statusCode = OK;
+    return setResponse("File uploaded successfully");
+}
+
 
 std::string Requests::getResponse() {
 	if (!this->_paramValid)
 		return "";
 	if (this->_statusCode == OK)
 		checkPage();
-	// if (this->_statusCode == OK && this->_method == "POST" && this->_requestContentType == "multipart/form-data")
-	// 	return doUpload();
-	if (this->_statusCode == OK) {
+	if (this->_statusCode == OK) 
+	{
 		std::vector<std::string> words = split(this->_path, ".");
 		if (words.size() == 1) {
 			this->_statusCode = BAD_REQUEST;
@@ -449,6 +762,13 @@ std::string Requests::getResponse() {
 		}
 		return getPage(this->_path, setResponse("OK"));
 	}
+	std::cout << "LILILILI !!!" << std::endl;
+	std::cout << "METHODE: " << this->_method << std::endl;
+	std::cout << "REQUEST CONTENT TYPE: " << this->_requestContentType.find("multipart/form-data") << std::endl;
+	if (this->_method == "POST" && this->_requestContentType.find("multipart/form-data") != std::string::npos) {
+            std::cout << "HEY COUCOU !!!" << std::endl;
+			return doUpload();
+    }
 	return setErrorPage();
 }
 

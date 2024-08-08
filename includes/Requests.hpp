@@ -33,11 +33,22 @@ class Requests {
 	public :
 
 		Requests(const std::string &buf, std::vector<Server> manager, int serverSocket);
+		Requests(const Requests& other);
+    	Requests& operator=(const Requests& other);
 		~Requests();
 		std::string getResponse();
 
 		void receiveBody(const std::string &buffBody);
 		std::string getRequestContentType() const;
+		std::string getContentLength() const;
+		void setStatusCode(int statusCode);
+
+		void handleRequest(const std::string& rawRequest);
+		void handlePostRequest();
+		void handleGetRequest();
+    	void processMultipartFormData(const std::string& bodyData);
+    	void parseMultipartPart(const std::string& part);
+    	void sendResponse(int clientSocket, const std::string& responseBody);
 
 	private :
 
@@ -54,6 +65,11 @@ class Requests {
 		std::string _cgiPathPhp;
 		std::string _body;
 		std::string _requestContentType;
+		std::map<std::string, std::string> _headers;
+		int _clientSocket;
+
+		void parseRequest(const std::string& rawRequest);
+        void parseHeaders(const std::string& headersPart);
 
 		void getQuery();
 		void checkPage();
@@ -76,6 +92,8 @@ class Requests {
 		std::string getCgiPathPhp() const;
 		void setCgiPathPhp(const std::string &path);
 		std::string doUpload();
+		std::string intToString(int value);
+    	std::string size_tToString(size_t value);
 };
 
 std::string itostr(int nb);
