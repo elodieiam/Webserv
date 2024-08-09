@@ -91,186 +91,220 @@ int ServerManager::compareClientSocket(int eventFd, bool forClose) {
     return -1;
 }
 
+std::string toHex(const std::string& input) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < input.size(); ++i) {
+        ss << std::setw(2) << static_cast<int>(static_cast<unsigned char>(input[i])) << " ";
+    }
+    return ss.str();
+}
+
 
 void ServerManager::handleClientSocket(epoll_event event)
 {
     char buffer[BUF_SIZE] = {0};
     int serverSocket = compareClientSocket(event.data.fd, 0);
-    if (event.events & EPOLLHUP)
-    {
+    if (serverSocket == -1) {
+        std::cerr << "Socket not found or already closed: " << event.data.fd << std::endl;
+        return;
+    }
+    if (event.events & EPOLLHUP) {
         std::cout << "EPOLLHUP event, closing socket: " << event.data.fd << std::endl;
-        close(event.data.fd);
+        compareClientSocket(event.data.fd, true);
         return;
     } 
-    else if (event.events & EPOLLIN)
-    {
+    else if (event.events & EPOLLIN) {
         std::string requestData;
         int bytesRead;
 
-        while ((bytesRead = recv(event.data.fd, buffer, BUF_SIZE, 0)) > 0) 
-        {
-            buffer[bytesRead] = '\0';
-            requestData.append(buffer);
-            bzero(buffer, sizeof(buffer));
+        // Reading the initial part of the request
+        while ((bytesRead = recv(event.data.fd, buffer, BUF_SIZE, 0)) > 0) {
+            requestData.append(buffer, bytesRead);
+            // std::cout << "PREMIER REQUEST DATA: " << requestData << std::endl;
+            // std::cout << "FIN DU PREMIER REQUEST DATA " << std::endl;
             if (requestData.find("\r\n\r\n") != std::string::npos)
                 break;
         }
 
-        if (bytesRead <= 0)
-        {
-            std::cout << "No bytes read or error, closing client socket: " << event.data.fd << std::endl;
+        if (bytesRead <= 0) {
+            // std::cout << "No bytes read or error, closing client socket: " << event.data.fd << std::endl;
             compareClientSocket(event.data.fd, 1);
         }
-        else
-        {
-            std::cout << "Request data received: " << requestData << std::endl;
+        else {
             Requests req(requestData, this->_servers, serverSocket);
+
             std::string bodyData;
-            size_t totalBytesRead = 0;
 
-            if (req.getRequestContentType().find("multipart/form-data") != std::string::npos) 
-            {
-                std::cout << "Processing multipart/form-data" << std::endl;
-                size_t contentLength = atoi(req.getContentLength().c_str());
-                std::cout << "Content-Length: " << contentLength << std::endl;
+            // Print headers and potential start of the body
+            if (requestData.find("\r\n\r\n") != std::string::npos) {
+                std::string headers = requestData.substr(0, requestData.find("\r\n\r\n"));
+                std::string potentialBodyStart = requestData.substr(requestData.find("\r\n\r\n") + 4);
 
-                bool bodyComplete = false;
-                while (totalBytesRead < contentLength) 
-                {
-                    bytesRead = recv(event.data.fd, buffer, BUF_SIZE, 0);
-                    if (bytesRead <= 0) 
-                    {
-                        std::cout << "Error or no more data to read, closing client socket: " << event.data.fd << std::endl;
-                        compareClientSocket(event.data.fd, 1);
-                        return;
-                    }
-                    buffer[bytesRead] = '\0';
-                    bodyData.append(buffer, bytesRead);
-                    totalBytesRead += bytesRead;
+                // std::cout << "Headers (hex): " << toHex(headers) << std::endl;
+                // std::cout << "Potential Body Start (hex): " << toHex(potentialBodyStart) << std::endl;
 
-                    std::cout << "Bytes read: " << bytesRead << ", Total bytes read: " << totalBytesRead << std::endl;
-                    std::cout << "BUFFER AFTER RECV: " << buffer << std::endl;
-
-                    bzero(buffer, sizeof(buffer));
-
-                    if (totalBytesRead >= contentLength) 
-                    {
-                        bodyComplete = true;
-                        break;
-                    }
-                }
-
-                std::cout << "Finished reading body data" << std::endl;
-                if (!bodyComplete) 
-                {
-                    std::cout << "Incomplete body data read, closing client socket: " << event.data.fd << std::endl;
-                    compareClientSocket(event.data.fd, 1);
-                } 
-                else 
-                {
-                    std::cout << "Total body data read: " << totalBytesRead << " bytes" << std::endl;
-                    std::cout << "Body data: " << bodyData << std::endl;
+                // If part of the body is already in requestData, append it to bodyData
+                if (potentialBodyStart.size() > 0) {
+                    // std::cout << "Part of the body is already in requestData, size: " << potentialBodyStart.size() << std::endl;
+                    bodyData.append(potentialBodyStart);
                 }
             }
-            std::cout << "AVANT RECEIVED BODY" << std::endl;
+
+            // std::cout << "Processing multipart/form-data" << std::endl;
+            size_t contentLength = atoi(req.getContentLength().c_str());
+            size_t totalBytesRead = bodyData.size(); // Start with any data already in bodyData
+            // std::cout << "Content-Length: " << contentLength << std::endl;
+
+            // Read the remaining part of the body if needed
+            while (totalBytesRead < contentLength) {
+                int remainingBytes = contentLength - totalBytesRead;
+                int bytesToRead = std::min(BUF_SIZE, remainingBytes);
+                bytesRead = recv(event.data.fd, buffer, bytesToRead, 0);
+                
+                if (bytesRead <= 0) {
+                    std::cerr << "Error reading from socket: " << strerror(errno) << std::endl;
+                    compareClientSocket(event.data.fd, 1);
+                    return;
+                }
+
+                bodyData.append(buffer, bytesRead);
+                totalBytesRead += bytesRead;
+
+                // std::cout << "Actual body size: " << bodyData.size() << std::endl;
+                // std::cout << "Expected Content-Length: " << contentLength << std::endl;
+                // std::cout << "bodyData: " << bodyData << std::endl;
+                // std::cout << "Bytes read: " << bytesRead << ", Total bytes read: " << totalBytesRead << std::endl;
+            }
+
+            // std::cout << "Total body data read: " << totalBytesRead << " bytes" << std::endl;
+
+            // if (totalBytesRead != contentLength) {
+            //     std::cerr << "Warning: Only " << totalBytesRead
+            //               << " bytes were read out of expected " << contentLength << " bytes." << std::endl;
+            // }
+
+            // std::cout << "AVANT RECEIVED BODY" << std::endl;
             req.receiveBody(bodyData);
             std::string response = req.getResponse();
-            std::cout << "CALLING REPONSE: " << response << std::endl;
-            if (response == "") 
-            {
-                std::cout << "Empty response, closing client socket: " << event.data.fd << std::endl;
-                compareClientSocket(event.data.fd, 1);
-            } 
-            else 
-            {
-                std::cout << "Sending response to client" << std::endl;
-                send(event.data.fd, response.c_str(), response.size(), 0);
-            }
-        }
-    }
-}
-
-/*
-void ServerManager::handleClientSocket(epoll_event event)
-{
-    char buffer[BUF_SIZE] = {0};
-    int serverSocket = compareClientSocket(event.data.fd, 0);
-    if (event.events & EPOLLHUP)
-	{
-        close(event.data.fd);
-        return;
-    } 
-	else if (event.events & EPOLLIN)
-	{
-        std::string requestData;
-        int bytesRead;
-        while ((bytesRead = recv(event.data.fd, buffer, BUF_SIZE, 0)) > 0) 
-		{
-            buffer[bytesRead] = '\0';
-            requestData.append(buffer);
-			bzero(buffer, sizeof(buffer));
-            if (requestData.find("\r\n\r\n") != std::string::npos)
-                break;
-        }
-        if (bytesRead <= 0)
-            compareClientSocket(event.data.fd, 1);
-		else 
-		{
-		    std::cout << "Request data received: " << requestData << std::endl;
-            //std::cout << "BUFFER size = " << strlen(buffer) << std::endl;
-            Requests req(requestData, this->_servers, serverSocket);
-            std::string bodyData;
-            size_t totalBytesRead = 0;
-
-            if (req.getRequestContentType().find("multipart/form-data")) 
-			{
-				std::cout << "Processing multipart/form-data" << std::endl;
-                size_t contentLength = atoi(req.getContentLength().c_str());
-                std::cout << "Content-Length: " << contentLength << std::endl;
-
-                // Read the body data until we have read Content-Length bytes
-                while (totalBytesRead < contentLength && (bytesRead = recv(event.data.fd, buffer, BUF_SIZE, 0)) > 0) {
-                    buffer[bytesRead] = '\0';
-                    bodyData.append(buffer, bytesRead);
-                    totalBytesRead += bytesRead;
-			
-                    std::cout << "Bytes read: " << bytesRead << ", Total bytes read: " << totalBytesRead << std::endl;
-                    std::cout << "BUFFER AFTER RECV: " << buffer << std::endl;
-
-                    bzero(buffer, sizeof(buffer));
-					std::cout << "APRES BEZERO" << std::endl;
-					break;
-					
-                }
-                std::cout << "Finished reading body data" << std::endl;
-				if (bytesRead <= 0 && totalBytesRead < contentLength) 
-				{
-                    std::cout << "Incomplete body data read, closing client socket: " << event.data.fd << std::endl;
-                    compareClientSocket(event.data.fd, 1);
-                } 
-				else 
-				{
-                    std::cout << "Total body data read: " << totalBytesRead << " bytes" << std::endl;
-                    std::cout << "Body data: " << bodyData << std::endl;
-                }
-            }
-			std::cout << "AVANT RECEIVED BODY" << std::endl;
-            req.receiveBody(bodyData);
-            std::string response = req.getResponse();
-			std::cout << "CALLING REPONSE: " << response << std::endl;
+            // std::cout << "CALLING REPONSE: " << response << std::endl;
             if (response == "") {
-                std::cout << "Empty response, closing client socket: " << event.data.fd << std::endl;
+                // std::cout << "Empty response, closing client socket: " << event.data.fd << std::endl;
                 compareClientSocket(event.data.fd, 1);
             } 
-			else 
-			{
-                std::cout << "Sending response to client" << std::endl;
+            else {
+                // std::cout << "Sending response to client" << std::endl;
                 send(event.data.fd, response.c_str(), response.size(), 0);
             }
         }
     }
 }
-*/
+
+// void ServerManager::handleClientSocket(epoll_event event)
+// {
+//     char buffer[BUF_SIZE] = {0};
+//     int serverSocket = compareClientSocket(event.data.fd, 0);
+//     if (serverSocket == -1) {
+//         // Si `compareClientSocket` a retourné -1, cela signifie que le socket n'a pas été trouvé
+//         std::cerr << "Socket not found or already closed: " << event.data.fd << std::endl;
+//         return;  // Ne continuez pas à traiter cet événement
+//     }
+//     if (event.events & EPOLLHUP)
+//     {
+//         std::cout << "EPOLLHUP event, closing socket: " << event.data.fd << std::endl;
+//         //close(event.data.fd);
+//         compareClientSocket(event.data.fd, true); 
+//         return;
+//     } 
+//     else if (event.events & EPOLLIN)
+//     {
+//         std::string requestData;
+//         int bytesRead;
+
+//         while ((bytesRead = recv(event.data.fd, buffer, BUF_SIZE, 0)) > 0) 
+//         {
+//             //buffer[bytesRead] = '\0';
+//             requestData.append(buffer);
+//             std::cout << "PREMIER REQUEST DATA: " << requestData << std::endl;
+//             std::cout << "FIN DU PREMIER REQUEST DATA " << std::endl;
+//             //bzero(buffer, sizeof(buffer));
+//             if (requestData.find("\r\n\r\n") != std::string::npos)
+//             {
+//                  break;
+//             }
+//         }
+
+//         if (bytesRead <= 0)
+//         {
+//             std::cout << "No bytes read or error, closing client socket: " << event.data.fd << std::endl;
+//             compareClientSocket(event.data.fd, 1);
+//         }
+//         else
+//         {
+//             // std::cout << "Request data received: " << requestData << std::endl;
+//             // std::cout << "Request data (hex): " << toHex(requestData) << std::endl;
+//             Requests req(requestData, this->_servers, serverSocket);
+
+//             std::string bodyData;
+//             // if (req.getRequestContentType().find("multipart/form-data") != std::string::npos) 
+//             // {
+//                 std::cout << "Processing multipart/form-data" << std::endl;
+//                 size_t contentLength = atoi(req.getContentLength().c_str());
+//                 size_t totalBytesRead = 0;
+//                 std::cout << "Content-Length: " << contentLength << std::endl;
+
+//                 while (totalBytesRead < contentLength) 
+//                 {
+//                     int remainingBytes = contentLength - totalBytesRead;
+//                     int bytesToRead = std::min(BUF_SIZE, remainingBytes);
+//                     int bytesRead = recv(event.data.fd, buffer,bytesToRead, 0);
+//                     // std::cout << "Buffer content (raw): " << std::string(buffer, bytesRead) << std::endl;
+//                     // std::string hexBuffer = toHex(std::string(buffer, bytesRead));
+//                     // std::cout << "BUFFER AFTER RECV: " << hexBuffer << std::endl;
+//                     bodyData.append(buffer, bytesRead);
+//                     std::cout << "Actual body size: " << bodyData.size() << std::endl;
+//                     std::cout << "Expected Content-Length: " << contentLength << std::endl;
+//                     std::cout << "bodyData: " << bodyData << std::endl;
+//                     totalBytesRead += bytesRead;
+//                     if (bytesRead <= 0) 
+//                     {
+//                         std::cerr << "Error reading from socket: " << strerror(errno) << std::endl;
+//                         compareClientSocket(event.data.fd, 1);
+//                         return ;
+//                     }
+//                     std::cout << "Bytes read: " << bytesRead << ", Total bytes read: " << totalBytesRead << std::endl;
+//                     // std::cout << "Bytes read: " << bytesRead << ", Total bytes read: " << totalBytesRead << std::endl;
+//                     std::cout << "BUFFER AFTER RECV: " << buffer << std::endl;
+//                 }
+
+//                 std::cout << "Total body data read: " << totalBytesRead << " bytes" << std::endl;
+    
+
+//             // }
+//             if (totalBytesRead != contentLength) {
+//                 std::cerr << "Warning: Only " << totalBytesRead 
+//                         << " bytes were read out of expected " << contentLength << " bytes." << std::endl;
+//             }
+
+//             std::cout << "AVANT RECEIVED BODY" << std::endl;
+//             req.receiveBody(bodyData);
+//             std::string response = req.getResponse();
+//             std::cout << "CALLING REPONSE: " << response << std::endl;
+//             if (response == "") 
+//             {
+//                 std::cout << "Empty response, closing client socket: " << event.data.fd << std::endl;
+//                 compareClientSocket(event.data.fd, 1);
+//             } 
+//             else 
+//             {
+//                 std::cout << "Sending response to client" << std::endl;
+//                 send(event.data.fd, response.c_str(), response.size(), 0);
+//             }
+//         }
+//     }
+// }
+
+
 
 /*
 void ServerManager::handleClientSocket(epoll_event event) {

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <unistd.h>
+#include <sstream> 
+#include <iomanip> 
 #include <vector>
 #include <map>
 #include <stdexcept>

@@ -33,19 +33,15 @@ class Requests {
 	public :
 
 		Requests(const std::string &buf, std::vector<Server> manager, int serverSocket);
-		Requests(const Requests& other);
-    	Requests& operator=(const Requests& other);
 		~Requests();
 		std::string getResponse();
 
 		void receiveBody(const std::string &buffBody);
 		std::string getRequestContentType() const;
 		std::string getContentLength() const;
-		void setStatusCode(int statusCode);
+		
 
-		void handleRequest(const std::string& rawRequest);
 		void handlePostRequest();
-		void handleGetRequest();
     	void processMultipartFormData(const std::string& bodyData);
     	void parseMultipartPart(const std::string& part);
     	void sendResponse(int clientSocket, const std::string& responseBody);
